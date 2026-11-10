@@ -39,17 +39,18 @@ sealed interface ModelState {
 class LabViewModel(app: Application) : AndroidViewModel(app) {
     private val store = ModelStore(app)
     val power = Power(app)
-    /** llama.cpp is not thread-safe: every call to it runs on this one thread. */
-    private val llmThread = Executors.newSingleThreadExecutor { r -> Thread(r, "llm").apply { priority = Thread.MAX_PRIORITY } }.asCoroutineDispatcher()
+    /** llama.cpp is not thread-safe: every call to it runs on the engine's one thread, shared with the assistant service. */
+    private val llmThread = AssistantEngine.dispatcher
     private val npuThread = Executors.newSingleThreadExecutor { r -> Thread(r, "npu") }.asCoroutineDispatcher()
-    private var handle = 0L
+    /** The chat's context, owned by the engine (which the assistant service shares). */
+    private val handle get() = AssistantEngine.chat
 
     var model by mutableStateOf<ModelState>(ModelState.Missing); private set
     val messages = mutableStateListOf<Message>()
     var busy by mutableStateOf(false); private set
     var thinking by mutableStateOf(false)
     /** Four was fastest on a Tensor G4 (more threads ran slower); never more than there are cores (the emulator has one). */
-    var threads by mutableStateOf(minOf(4, Runtime.getRuntime().availableProcessors()))
+    var threads by mutableStateOf(AssistantEngine.threads)
     var used by mutableStateOf(0); private set
     var systemInfo by mutableStateOf(""); private set
     val modelDir: String get() = store.dir.absolutePath
@@ -64,6 +65,8 @@ class LabViewModel(app: Application) : AndroidViewModel(app) {
     private var genJob: Job? = null
 
     init {
+        AssistantEngine.init(app)
+        AssistantEngine.acquire()
         viewModelScope.launch {
             while (isActive) {
                 val w = withContext(Dispatchers.Default) { power.watts() }
@@ -95,12 +98,12 @@ class LabViewModel(app: Application) : AndroidViewModel(app) {
         if (model is ModelState.Ready) return
         model = ModelState.Loading(file.name)
         viewModelScope.launch {
-            model = withContext(llmThread) {
-                runCatching {
-                    if (handle != 0L) { Llm.nativeFree(handle); handle = 0L }
-                    handle = Llm.nativeLoad(file.absolutePath, 4096, threads)
-                    ModelState.Ready(file.name, Llm.nativeCtx(handle))
-                }.getOrElse { ModelState.Failed(it.message ?: it.toString()) }
+            AssistantEngine.threads = threads
+            model = when (val s = AssistantEngine.load()) {
+                is AssistantEngine.State.Ready -> ModelState.Ready(s.name, s.ctx)
+                is AssistantEngine.State.Failed -> ModelState.Failed(s.why)
+                is AssistantEngine.State.Loading -> ModelState.Loading(s.name)
+                AssistantEngine.State.Missing -> ModelState.Missing
             }
             askPending()
         }
@@ -126,7 +129,7 @@ class LabViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     private suspend fun unload() {
-        withContext(llmThread) { if (handle != 0L) { Llm.nativeFree(handle); handle = 0L } }
+        AssistantEngine.unload()
         messages.clear(); firstTurn = true; closePrevious = false; used = 0
     }
 
@@ -155,7 +158,7 @@ class LabViewModel(app: Application) : AndroidViewModel(app) {
                 runCatching {
                     val pre = Llm.nativePrefill(h, Prompt.turn(text, firstTurn, closePrevious, think))
                     firstTurn = false
-                    val gen = Llm.nativeGenerate(h, if (think) 2048 else 768, if (think) .6f else .7f, if (think) .95f else .8f, 20) { bytes ->
+                    val gen = Llm.nativeGenerate(h, if (think) 2048 else 768, if (think) .6f else .7f, if (think) .95f else .8f, 20, null) { bytes ->
                         val piece = String(bytes, Charsets.UTF_8)
                         synchronized(raw) { raw.append(piece) }
                         val (t, a) = Prompt.split(synchronized(raw) { raw.toString() }, think)
@@ -261,9 +264,6 @@ class LabViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    override fun onCleared() {
-        val h = handle; handle = 0L
-        if (h != 0L) Thread { Llm.nativeFree(h) }.start()
-        super.onCleared()
-    }
+    // The model stays with the engine: freed a few minutes after nothing holds it (this screen or Uno's search).
+    override fun onCleared() { AssistantEngine.release(); super.onCleared() }
 }

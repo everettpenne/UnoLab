@@ -9,13 +9,17 @@ object Llm {
     external fun nativeLoad(path: String, nCtx: Int, threads: Int): Long
     external fun nativeFree(handle: Long)
     external fun nativeReset(handle: Long)
+    /** Another context on [handle]'s model; free it before [handle]. */
+    external fun nativeNewContext(handle: Long, nCtx: Int, threads: Int): Long
+    external fun nativeSaveState(handle: Long): ByteArray
+    external fun nativeRestoreState(handle: Long, state: ByteArray, nPast: Int): Boolean
     external fun nativeUsed(handle: Long): Int
     external fun nativeCtx(handle: Long): Int
     external fun nativeStop(handle: Long)
     /** {tokens, ms} */
     external fun nativePrefill(handle: Long, text: String): DoubleArray
     /** {tokens, ms, endedNaturally} */
-    external fun nativeGenerate(handle: Long, maxTokens: Int, temp: Float, topP: Float, topK: Int, sink: PieceSink): DoubleArray
+    external fun nativeGenerate(handle: Long, maxTokens: Int, temp: Float, topP: Float, topK: Int, grammar: String?, sink: PieceSink): DoubleArray
     external fun nativeSystemInfo(): String
 }
 

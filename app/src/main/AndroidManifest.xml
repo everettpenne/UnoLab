@@ -26,5 +26,8 @@
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
+        <!-- The assistant, for Uno Launcher's search to bind to. Exported, but every call checks that the caller is Uno, signed with Uno's own key
+             (AssistantService.CallerPolicy): the two apps are signed with different keys, so a signature permission cannot do it. -->
+        <service android:name=".AssistantService" android:exported="true" />
     </application>
 </manifest>

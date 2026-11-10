@@ -18,6 +18,18 @@ model never shares memory with the launcher, and it has no network permission: n
 Why the chat is on the CPU and not the NPU: measured on a Pixel 10a, the NPU streams weights at 20–26 GB/s for about a third of the
 CPU's energy per token, but it takes int8 only, and int8 activations wreck Qwen3.5's Gated DeltaNet layers by the third layer.
 
+## The assistant service (for Uno Launcher)
+
+`AssistantService` is a bound service (`IAssistant.aidl`) that Uno's search can ask, so the model stays in this app's process and never in
+the launcher's. It serves only Uno and Uno Dev, checked on every call by package and signing certificate (`CallerPolicy`). Two modes:
+**ANSWER**, a short streamed reply, and **ACTION**, where a GBNF grammar holds the model to one JSON object naming one of Uno's actions
+(timer, alarm, stopwatch, torch, focus, note, open an app, call, text, web search, or none). Uno shows an action as a row to tap; nothing is
+done on the model's word alone. Each mode's system prompt is decoded once and its state saved, so later questions start from it. The chat
+and the service share one copy of the weights (two contexts), freed three minutes after nothing holds it.
+
+On the one-core emulator, "pasta timer 12 minutes" came back as `{"action":"timer","seconds":720,"label":"pasta"}` in 52 s (most of it the
+system prompt), and the next question, with the prompt's saved state, in 7.5 s. Not yet timed on a phone.
+
 ## Install
 
 Download `UnoLab-<version>.apk` from the [Releases](https://github.com/everettpenne/UnoLab/releases) page and check it against

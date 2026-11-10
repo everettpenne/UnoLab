@@ -24,6 +24,8 @@ struct Session {
     int nCtx = 0;
     int nBatch = 512;
     std::atomic<bool> stop{false};
+    // A second context on the same weights (nativeNewContext) does not own the model; free it before the one that does.
+    bool ownsModel = true;
 };
 
 double nowMs() {
@@ -96,8 +98,46 @@ JNIEXPORT void JNICALL Java_com_everettpenne_unolab_Llm_nativeFree(JNIEnv*, jobj
     auto* s = reinterpret_cast<Session*>(h);
     if (!s) return;
     llama_free(s->ctx);
-    llama_model_free(s->model);
+    if (s->ownsModel) llama_model_free(s->model);
     delete s;
+}
+
+// Another context on [h]'s model, for a second conversation that does not disturb the first (the assistant's one-shot questions beside the chat).
+JNIEXPORT jlong JNICALL Java_com_everettpenne_unolab_Llm_nativeNewContext(JNIEnv* env, jobject, jlong h, jint nCtx, jint threads) {
+    auto* owner = reinterpret_cast<Session*>(h);
+    llama_context_params cp = llama_context_default_params();
+    cp.n_ctx = nCtx; cp.n_batch = 512; cp.n_ubatch = 512; cp.n_threads = threads; cp.n_threads_batch = threads;
+    llama_context* ctx = llama_init_from_model(owner->model, cp);
+    if (!ctx) { throwJava(env, "The context could not be created"); return 0; }
+    auto* s = new Session();
+    s->model = owner->model; s->ctx = ctx; s->vocab = owner->vocab; s->ownsModel = false;
+    s->nCtx = (int)llama_n_ctx(ctx);
+    return reinterpret_cast<jlong>(s);
+}
+
+// The context's state (its one sequence), to come back to later: the recurrent layers cannot drop tokens, so a prompt's prefix is saved once
+// and restored before each question instead of decoded again.
+JNIEXPORT jbyteArray JNICALL Java_com_everettpenne_unolab_Llm_nativeSaveState(JNIEnv* env, jobject, jlong h) {
+    auto* s = reinterpret_cast<Session*>(h);
+    size_t size = llama_state_seq_get_size(s->ctx, 0);
+    std::vector<uint8_t> buf(size);
+    size_t n = llama_state_seq_get_data(s->ctx, buf.data(), size, 0);
+    jbyteArray out = env->NewByteArray((jsize)n);
+    env->SetByteArrayRegion(out, 0, (jsize)n, reinterpret_cast<const jbyte*>(buf.data()));
+    return out;
+}
+
+// Puts back a state from nativeSaveState, with [nPast] tokens in it. False if llama.cpp did not take it.
+JNIEXPORT jboolean JNICALL Java_com_everettpenne_unolab_Llm_nativeRestoreState(JNIEnv* env, jobject, jlong h, jbyteArray data, jint nPast) {
+    auto* s = reinterpret_cast<Session*>(h);
+    llama_memory_clear(llama_get_memory(s->ctx), true);
+    jsize len = env->GetArrayLength(data);
+    std::vector<uint8_t> buf(len);
+    env->GetByteArrayRegion(data, 0, len, reinterpret_cast<jbyte*>(buf.data()));
+    size_t read = llama_state_seq_set_data(s->ctx, buf.data(), buf.size(), 0);
+    if (read == 0) { s->nPast = 0; return JNI_FALSE; }
+    s->nPast = nPast;
+    return JNI_TRUE;
 }
 
 JNIEXPORT void JNICALL Java_com_everettpenne_unolab_Llm_nativeReset(JNIEnv*, jobject, jlong h) {
@@ -136,15 +176,23 @@ JNIEXPORT jdoubleArray JNICALL Java_com_everettpenne_unolab_Llm_nativePrefill(JN
     return out;
 }
 
-// Samples up to [maxTokens], handing each complete piece of UTF-8 to sink.onPiece(byte[]) as it comes. Stops at an end-of-generation token (which is
+// Samples up to [maxTokens] (within [grammar], a GBNF string, when it is not null), handing each complete piece of UTF-8 to sink.onPiece(byte[]) as it comes. Stops at an end-of-generation token (which is
 // not added to the context: the caller adds <|im_end|> itself), at the context's end, or on nativeStop. Returns {tokens, milliseconds, endedNaturally}.
 JNIEXPORT jdoubleArray JNICALL Java_com_everettpenne_unolab_Llm_nativeGenerate(JNIEnv* env, jobject, jlong h, jint maxTokens, jfloat temp, jfloat topP,
-                                                                                jint topK, jobject sink) {
+                                                                                jint topK, jstring jgrammar, jobject sink) {
     auto* s = reinterpret_cast<Session*>(h);
     s->stop = false;
     jclass sinkCls = env->GetObjectClass(sink);
     jmethodID onPiece = env->GetMethodID(sinkCls, "onPiece", "([B)V");
     llama_sampler* smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
+    // A GBNF grammar, when given, keeps the output to what it allows (the assistant's actions: one JSON object of a fixed shape).
+    if (jgrammar) {
+        const char* g = env->GetStringUTFChars(jgrammar, nullptr);
+        llama_sampler* gs = llama_sampler_init_grammar(s->vocab, g, "root");
+        env->ReleaseStringUTFChars(jgrammar, g);
+        if (!gs) { llama_sampler_free(smpl); throwJava(env, "The grammar could not be read"); return nullptr; }
+        llama_sampler_chain_add(smpl, gs);
+    }
     llama_sampler_chain_add(smpl, llama_sampler_init_top_k(topK));
     llama_sampler_chain_add(smpl, llama_sampler_init_top_p(topP, 1));
     llama_sampler_chain_add(smpl, llama_sampler_init_temp(temp));
