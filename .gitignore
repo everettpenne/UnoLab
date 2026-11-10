@@ -4,3 +4,4 @@ app/.cxx/
 local.properties
 *.gguf
 .DS_Store
+dist/

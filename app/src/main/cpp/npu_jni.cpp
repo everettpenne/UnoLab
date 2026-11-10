@@ -1,4 +1,4 @@
-// The NPU lab: raw NNAPI (NDK only, no Tensor SDK, no TFLite), ported from ~/Code/qwen-npu/probe/nnapi_probe.cpp. The device and FC code below
+// The NPU lab: raw NNAPI (NDK only, no Tensor SDK, no TFLite), ported from a standalone probe (nnapi_probe.cpp). The device and FC code below
 // is the probe's, unchanged but for its printing.
 #include <android/neuralnetworks.h>
 

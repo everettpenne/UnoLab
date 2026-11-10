@@ -147,8 +147,7 @@ private fun NpuLab(vm: LabViewModel, modifier: Modifier) {
     LaunchedEffect(Unit) { vm.loadDevices() }
     var big by remember { mutableStateOf(false) }
     Column(modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("Raw NNAPI, no Google SDK: one int8 fully-connected layer at a time, pinned to the accelerator so nothing falls back to the CPU. " +
-            "The same probe as ~/Code/qwen-npu.", color = Color.White.copy(alpha = .6f), style = MaterialTheme.typography.bodySmall)
+        Text("Raw NNAPI, no Google SDK: one int8 fully-connected layer at a time, pinned to the accelerator so nothing falls back to the CPU. ", color = Color.White.copy(alpha = .6f), style = MaterialTheme.typography.bodySmall)
         Text("Devices", style = MaterialTheme.typography.titleSmall)
         if (vm.devices.isEmpty()) Text("None visible to this app.", color = Color.White.copy(alpha = .6f))
         vm.devices.forEach { d -> val (name, type, level) = (d.split('|') + listOf("", "", "")).take(3)
