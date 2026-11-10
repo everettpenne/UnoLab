@@ -126,7 +126,7 @@ object AssistantEngine {
                 if (job?.isActive != true) return@launch
                 val h = helper
                 val gen = Llm.nativeGenerate(h, Assistant.maxTokens(mode), Assistant.temperature(mode), .9f, 20,
-                    if (mode == Assistant.ACTION) Assistant.GRAMMAR else null) { bytes ->
+                    Assistant.grammar(mode)) { bytes ->
                     if (job.isActive) listener.onPiece(String(bytes, Charsets.UTF_8)) else Llm.nativeStop(h)
                 }
                 if (job.isActive) listener.onDone((pre[1] + gen[1]).toLong(), gen[0].toInt())

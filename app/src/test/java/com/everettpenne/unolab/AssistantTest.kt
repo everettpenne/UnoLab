@@ -59,4 +59,16 @@ class AssistantTest {
             assertTrue(it, Assistant.GRAMMAR.contains("\\\"$it\\\""))
         }
     }
+
+    @Test fun anAnswerIsHeldToOnePlainParagraph() {
+        assertEquals(Assistant.GRAMMAR, Assistant.grammar(Assistant.ACTION))
+        assertEquals(Assistant.ANSWER_GRAMMAR, Assistant.grammar(Assistant.ANSWER))
+        // No markdown, list, table or bracket characters, and no line break, anywhere in an answer.
+        listOf("#", "*", "|", "\\[", "\\]", "`", "\\n").forEach { assertTrue(it, Assistant.ANSWER_GRAMMAR.substringAfter("] [^").contains(it)) }
+        assertTrue(Assistant.temperature(Assistant.ANSWER) <= .3f)
+    }
+
+    @Test fun theActionExamplesCoverTheReadingsTheModelGotWrong() {
+        listOf("\"stopwatch\"", "\"note\"", "\"text\"", "\"in_minutes\"", "\"focus\"").forEach { assertTrue(it, Assistant.ACTION_SYSTEM.contains(it)) }
+    }
 }
