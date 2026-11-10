@@ -9,9 +9,16 @@ object Assistant {
     const val ACTION = 1
     /** Longer questions are cut: search queries are short, and a long one would only cost prefill time. */
     const val MAX_QUERY = 500
+    /** Phone context longer than this is cut: Uno sends a few short lines, and every token of it is read before the answer starts. */
+    const val MAX_CONTEXT = 2000
+    /** What [IAssistant.version] answers: 1 added askWithContext. An older Uno Lab has no version() and so reads as 0. */
+    const val VERSION = 1
+
+    /** Said in both prompts, since Uno may put what the phone knows (date, battery, alarm…) before the question. */
+    private const val CONTEXT_RULE = "The user's message may start with phone context from this phone; use it when it answers the question and never invent it."
 
     const val ANSWER_SYSTEM = "You are Uno, an assistant running entirely on this phone, answering from the phone's search. " +
-        "Answer in one to three short sentences, plainly, without lists or headings. If you are not sure, say so."
+        "Answer in one to three short sentences, plainly, without lists or headings. If you are not sure, say so. " + CONTEXT_RULE
 
     const val ACTION_SYSTEM = "You turn a request typed into a phone's search into one action for the phone, as JSON. Actions:\n" +
         "timer: seconds, and an optional label\n" +
@@ -31,6 +38,7 @@ object Assistant {
         "turn on the flashlight -> {\"action\":\"torch\"}\n" +
         "open the camera -> {\"action\":\"open_app\",\"name\":\"Camera\"}\n" +
         "why is the sky blue -> {\"action\":\"none\"}\n" +
+        CONTEXT_RULE + "\n" +
         "Reply with the JSON only."
 
     /** GBNF: one action object, nothing else. Strings are short and have no quotes or backslashes, so Uno can read them without surprises. */
@@ -53,12 +61,19 @@ str ::= "\"" [^"\\\n]{1,80} "\""
     /** The fixed start of every question in [mode]: decoded once, its state saved and put back before each question. */
     fun prefix(mode: Int): String = "<|im_start|>system\n" + (if (mode == ACTION) ACTION_SYSTEM else ANSWER_SYSTEM) + "<|im_end|>\n"
 
-    /** The question, after [prefix]: thinking off (an empty think block), as the chat does. */
-    fun turn(query: String): String =
-        "<|im_start|>user\n" + clean(query) + "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    /**
+     * The question, after [prefix]: thinking off (an empty think block), as the chat does. Phone [context], when there is any, opens the user
+     * turn (`<context>\n\nQuestion: <query>`), so it comes after the saved system prompt and the prompt's state can still be reused.
+     */
+    fun turn(query: String, context: String? = null): String {
+        val ctx = context?.let { clean(it, MAX_CONTEXT) }.orEmpty()
+        val user = if (ctx.isEmpty()) clean(query) else ctx + "\n\nQuestion: " + clean(query)
+        return "<|im_start|>user\n" + user + "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    }
 
-    /** The query as the model sees it: control characters (and so any chat-format token text) taken out, trimmed, and capped. */
-    fun clean(query: String): String = query.filter { it == '\n' || !it.isISOControl() }.replace("<|", "< |").trim().take(MAX_QUERY)
+    /** Text as the model sees it: control characters (and so any chat-format token text) taken out, trimmed, and capped at [max]. */
+    fun clean(text: String, max: Int = MAX_QUERY): String =
+        text.filter { it == '\n' || !it.isISOControl() }.replace("<|", "< |").trim().take(max).trimEnd()
 
     /** Sampling: an action is near-greedy (it should be the most likely reading), an answer a little freer. */
     fun maxTokens(mode: Int) = if (mode == ACTION) 64 else 220

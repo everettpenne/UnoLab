@@ -21,10 +21,10 @@ import java.util.concurrent.TimeUnit
 class AssistantEngineInstrumentedTest {
     private val context: Context get() = InstrumentationRegistry.getInstrumentation().targetContext
 
-    private fun ask(q: String, mode: Int): Pair<String, Long> {
+    private fun ask(q: String, mode: Int, phone: String? = null): Pair<String, Long> {
         val out = StringBuilder(); val done = CountDownLatch(1); var error: String? = null
         val t0 = System.nanoTime()
-        AssistantEngine.ask(q, mode, object : AssistantEngine.Listener {
+        AssistantEngine.ask(q, phone, mode, object : AssistantEngine.Listener {
             override fun onPiece(piece: String) { out.append(piece) }
             override fun onDone(ms: Long, tokens: Int) { done.countDown() }
             override fun onError(why: String) { error = why; done.countDown() }
@@ -46,6 +46,16 @@ class AssistantEngineInstrumentedTest {
         assertTrue(first, shape.matches(first))
         assertTrue(second, shape.matches(second))
         assertTrue("the second question reused the decoded system prompt: $firstMs vs $secondMs ms", secondMs < firstMs)
+    }
+
+    @Test fun anAnswerUsesThePhoneContext() {
+        AssistantEngine.init(context)
+        AssistantEngine.threads = minOf(4, Runtime.getRuntime().availableProcessors())
+        val state = AssistantEngine.loadNowBlocking()
+        assumeTrue("the model is in Uno Lab: $state", state is AssistantEngine.State.Ready)
+        val (answer, ms) = ask("What day is it?", Assistant.ANSWER, "Phone context (from this phone, now):\n- Date: Tuesday 10 November 2026")
+        Log.i("AssistantTest", "with context ${ms} ms: $answer")
+        assertTrue(answer, answer.contains("Tuesday", ignoreCase = true))
     }
 
     @Test fun theServiceRefusesAnAppThatIsNotUno() {

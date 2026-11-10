@@ -35,8 +35,8 @@ object AssistantEngine {
     }
 
     const val CONTEXT = 4096
-    /** The assistant's context: a system prompt and one short question and answer. */
-    private const val HELPER_CONTEXT = 1536
+    /** The assistant's context: a system prompt, up to 2,000 characters of phone context, and one short question and answer. */
+    private const val HELPER_CONTEXT = 2048
     const val IDLE_MS = 3 * 60_000L
 
     val dispatcher = Executors.newSingleThreadExecutor { r -> Thread(r, "llm").apply { priority = Thread.MAX_PRIORITY } }.asCoroutineDispatcher()
@@ -108,8 +108,11 @@ object AssistantEngine {
         askJob?.cancel()
     }
 
-    /** Asks the assistant one question in [mode] (see [Assistant]), replacing any still running; [listener] is called on the model's thread. */
-    fun ask(query: String, mode: Int, listener: Listener) {
+    /**
+     * Asks the assistant one question in [mode] (see [Assistant]), with optional phone [context] from Uno, replacing any still running;
+     * [listener] is called on the model's thread. The context is used for this question only and kept nowhere.
+     */
+    fun ask(query: String, context: String?, mode: Int, listener: Listener) {
         cancel()
         askJob = scope.launch {
             val job = coroutineContext[Job]
@@ -118,7 +121,7 @@ object AssistantEngine {
             runCatching {
                 if (helper == 0L) helper = Llm.nativeNewContext(chat, HELPER_CONTEXT, threads)
                 startFrom(mode)
-                val pre = Llm.nativePrefill(helper, Assistant.turn(query))
+                val pre = Llm.nativePrefill(helper, Assistant.turn(query, context))
                 // A question replaced while it was still being read is dropped here, before anything is written for it.
                 if (job?.isActive != true) return@launch
                 val h = helper

@@ -27,6 +27,14 @@ the launcher's. It serves only Uno and Uno Dev, checked on every call by package
 done on the model's word alone. Each mode's system prompt is decoded once and its state saved, so later questions start from it. The chat
 and the service share one copy of the weights (two contexts), freed three minutes after nothing holds it.
 
+**Phone context.** `askWithContext(query, context, mode, sink)` takes, beside the question, a few lines Uno gathers on the phone for that
+question (date and time, battery, next alarm, what's playing, and so on), so Qwen can answer "what day is it?" from the phone rather than
+guess. The context is cleaned like the query (chat-format tokens and control characters taken out), cut at 2,000 characters, and placed at
+the start of the user turn as `<context>\n\nQuestion: <query>`, after the saved system prompt, so that prompt's state is still reused. Both
+prompts tell the model to use it when it answers the question and never to invent it. It is used for that one question and kept nowhere;
+Uno Lab still has no network permission. `version()` answers 1; an Uno Lab from before this has no `version()` (the call returns 0), and Uno
+then falls back to `ask()` without context.
+
 On the one-core emulator, "pasta timer 12 minutes" came back as `{"action":"timer","seconds":720,"label":"pasta"}` in 52 s (most of it the
 system prompt), and the next question, with the prompt's saved state, in 7.5 s. Not yet timed on a phone.
 

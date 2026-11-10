@@ -24,18 +24,23 @@ class AssistantService : Service() {
 
         override fun warm() { check(); AssistantEngine.warm() }
 
-        override fun ask(query: String?, mode: Int, sink: IAnswerSink?) {
-            check()
-            if (query.isNullOrBlank() || sink == null || mode !in Assistant.ANSWER..Assistant.ACTION) return
-            AssistantEngine.ask(query, mode, object : AssistantEngine.Listener {
-                // The caller going away (a RemoteException) stops the answer rather than writing it for nobody.
-                override fun onPiece(piece: String) { try { sink.onPiece(piece) } catch (_: RemoteException) { AssistantEngine.cancel() } }
-                override fun onDone(ms: Long, tokens: Int) { runCatching { sink.onDone(ms, tokens) } }
-                override fun onError(why: String) { runCatching { sink.onError(why) } }
-            })
-        }
+        override fun ask(query: String?, mode: Int, sink: IAnswerSink?) { check(); answer(query, null, mode, sink) }
+
+        override fun version(): Int { check(); return Assistant.VERSION }
+
+        override fun askWithContext(query: String?, context: String?, mode: Int, sink: IAnswerSink?) { check(); answer(query, context, mode, sink) }
 
         override fun cancel() { check(); AssistantEngine.cancel() }
+    }
+
+    private fun answer(query: String?, context: String?, mode: Int, sink: IAnswerSink?) {
+        if (query.isNullOrBlank() || sink == null || mode !in Assistant.ANSWER..Assistant.ACTION) return
+        AssistantEngine.ask(query, context, mode, object : AssistantEngine.Listener {
+            // The caller going away (a RemoteException) stops the answer rather than writing it for nobody.
+            override fun onPiece(piece: String) { try { sink.onPiece(piece) } catch (_: RemoteException) { AssistantEngine.cancel() } }
+            override fun onDone(ms: Long, tokens: Int) { runCatching { sink.onDone(ms, tokens) } }
+            override fun onError(why: String) { runCatching { sink.onError(why) } }
+        })
     }
 
     private fun check() {
