@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- No network permission: the model and everything said to it stay on the phone. -->
+    <application android:label="Uno Lab" android:icon="@mipmap/ic_launcher" android:theme="@android:style/Theme.Material.NoActionBar"
+        android:largeHeap="true" android:extractNativeLibs="false">
+        <activity android:name=".MainActivity" android:exported="true" android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize" android:label="Uno Lab">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- "Ask Qwen" in any app's text-selection menu. -->
+            <intent-filter android:label="Ask Qwen">
+                <action android:name="android.intent.action.PROCESS_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+            <intent-filter android:label="Ask Qwen">
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+            <!-- For Uno Launcher's search to hand a question over: action com.everettpenne.unolab.ASK, the question in EXTRA_TEXT. -->
+            <intent-filter>
+                <action android:name="com.everettpenne.unolab.ASK" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
