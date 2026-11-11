@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The role's session: it reads the screen once and opens Uno's search. No recognitionService: a sideloaded app cannot hold the
+     privileged hotword permission, so there is no "Hey Qwen" and no voice session to declare. -->
+<voice-interaction-service android:sessionService=".AssistSessionService" android:supportsAssist="true"
+    xmlns:android="http://schemas.android.com/apk/res/android" />

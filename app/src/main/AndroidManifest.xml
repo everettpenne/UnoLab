@@ -29,5 +29,16 @@
         <!-- The assistant, for Uno Launcher's search to bind to. Exported, but every call checks that the caller is Uno, signed with Uno's own key
              (AssistantService.CallerPolicy): the two apps are signed with different keys, so a signature permission cannot do it. -->
         <service android:name=".AssistantService" android:exported="true" />
+        <!-- The system assistant role (RoleManager.ROLE_ASSISTANT): the assist gesture lands in AssistSession, which reads the screen's
+             text and opens Uno's search with it. Lab holds the role rather than the launcher because Lab has no INTERNET permission. -->
+        <service android:name=".AssistService" android:exported="true"
+            android:permission="android.permission.BIND_VOICE_INTERACTION">
+            <meta-data android:name="android.voice_interaction" android:resource="@xml/voice_interaction" />
+            <intent-filter>
+                <action android:name="android.service.voice.VoiceInteractionService" />
+            </intent-filter>
+        </service>
+        <service android:name=".AssistSessionService" android:exported="true"
+            android:permission="android.permission.BIND_VOICE_INTERACTION" />
     </application>
 </manifest>

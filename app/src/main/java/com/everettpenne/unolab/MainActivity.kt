@@ -1,5 +1,6 @@
 package com.everettpenne.unolab
 
+import android.app.role.RoleManager
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -25,6 +26,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
@@ -34,6 +36,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 class MainActivity : ComponentActivity() {
     /** A question handed over by another app (Uno's search, or "Ask Qwen" on selected text), asked once the model is ready. */
     private var handed by mutableStateOf<String?>(null)
+    /** Bumped on every resume, so returning from the system's assistant chooser re-reads whether the role was granted. */
+    private var resumes by mutableIntStateOf(0)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -41,9 +45,14 @@ class MainActivity : ComponentActivity() {
         handed = questionFrom(intent)
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(primary = Color(0xFF9BC5D7), secondary = Color(0xFFD1BE98))) {
-                Surface(Modifier.fillMaxSize(), color = Color(0xFF0E1214), contentColor = Color.White) { Lab(handed) { handed = null } }
+                Surface(Modifier.fillMaxSize(), color = Color(0xFF0E1214), contentColor = Color.White) { Lab(handed, resumes) { handed = null } }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        resumes++
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -64,7 +73,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun Lab(handed: String?, onHandedTaken: () -> Unit) {
+private fun Lab(handed: String?, resumes: Int, onHandedTaken: () -> Unit) {
     val vm: LabViewModel = viewModel()
     var tab by rememberSaveable { mutableIntStateOf(0) }
     // A handed-over question goes to the chat; the view model asks it as soon as the model is ready.
@@ -79,7 +88,7 @@ private fun Lab(handed: String?, onHandedTaken: () -> Unit) {
         when (tab) {
             0 -> Chat(vm, Modifier.weight(1f))
             1 -> NpuLab(vm, Modifier.weight(1f))
-            else -> ModelTab(vm, Modifier.weight(1f))
+            else -> ModelTab(vm, resumes, Modifier.weight(1f))
         }
     }
 }
@@ -179,6 +188,34 @@ private fun NpuLab(vm: LabViewModel, modifier: Modifier) {
     }
 }
 
+/**
+ * The system assistant role. Taking it is what lets the assist gesture open Uno's search from any app, with that app's screen as a fact for
+ * the answer. It is asked for, never assumed: the system dialog is the consent, and Settings can take it back at any time.
+ */
+@Composable
+private fun AssistantRole(resumes: Int) {
+    val context = LocalContext.current
+    val roles = remember { context.getSystemService(RoleManager::class.java) }
+    val available = remember(resumes) { roles?.isRoleAvailable(RoleManager.ROLE_ASSISTANT) == true }
+    val held = remember(resumes) { roles?.isRoleHeld(RoleManager.ROLE_ASSISTANT) == true }
+    val ask = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { }
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("System assistant", style = MaterialTheme.typography.titleSmall)
+        Text(when {
+            !available -> "This phone offers no assistant role to take."
+            held -> "Uno Lab is the assistant: the assist gesture opens Uno's search from any app, with what is on the screen."
+            else -> "The assistant gesture can open Uno's search from any app, with what is on the screen."
+        }, style = MaterialTheme.typography.bodySmall)
+        if (available && !held) {
+            Button({ roles?.let { ask.launch(it.createRequestRoleIntent(RoleManager.ROLE_ASSISTANT)) } }, Modifier.testTag("assistant-role")) {
+                Text("Make Uno Lab the assistant")
+            }
+        }
+        Text("No hotword: \"Hey Qwen\" needs a privileged permission a sideloaded app cannot hold. The gesture — or Uno's own search — is how it opens.",
+            style = MaterialTheme.typography.bodySmall, color = Color.White.copy(alpha = .6f))
+    }
+}
+
 @Composable
 private fun ModelStatus(vm: LabViewModel) {
     when (val m = vm.model) {
@@ -192,9 +229,11 @@ private fun ModelStatus(vm: LabViewModel) {
 }
 
 @Composable
-private fun ModelTab(vm: LabViewModel, modifier: Modifier) {
+private fun ModelTab(vm: LabViewModel, resumes: Int, modifier: Modifier) {
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let(vm::import) }
     Column(modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        AssistantRole(resumes)
+        HorizontalDivider()
         ModelStatus(vm)
         Row {
             Button({ pick.launch(arrayOf("application/octet-stream", "*/*")) }, enabled = vm.model !is ModelState.Importing && !vm.busy) { Text("Import model") }
