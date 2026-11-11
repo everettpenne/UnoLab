@@ -1,7 +1,9 @@
 package com.everettpenne.unolab
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.asCoroutineDispatcher
@@ -10,6 +12,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.DataInputStream
+import java.io.DataOutputStream
+import java.io.File
+import java.security.MessageDigest
 import java.util.concurrent.Executors
 
 /**
@@ -37,11 +43,23 @@ object AssistantEngine {
     const val CONTEXT = 4096
     /** The assistant's context: a system prompt, up to 2,000 characters of phone context, and one short question and answer. */
     private const val HELPER_CONTEXT = 2048
-    const val IDLE_MS = 3 * 60_000L
+    /**
+     * How long the weights stay loaded with nobody holding them. Search is opened in bursts; a 3-minute window meant the next question
+     * after a short pause paid the whole model load again. The weights (and their repacked copy) are ~2.5 GB, so this is a real trade,
+     * but the launcher is a foreground app and Android reclaims the process under pressure anyway.
+     */
+    const val IDLE_MS = 10 * 60_000L
+    /** A saved prefix state is the KV and recurrent state for a few hundred tokens: a few MB. Anything larger is not worth keeping. */
+    private const val MAX_PREFIX_BYTES = 64L * 1024 * 1024
+    private const val TAG = "UnoLabTiming"
 
     val dispatcher = Executors.newSingleThreadExecutor { r -> Thread(r, "llm").apply { priority = Thread.MAX_PRIORITY } }.asCoroutineDispatcher()
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
+    /** Writing a prefix state must not sit in front of the next question on the model's thread. */
+    private val io = Executors.newSingleThreadExecutor { r -> Thread(r, "prefix-io") }.asCoroutineDispatcher()
+    private val ioScope = CoroutineScope(SupervisorJob() + io)
     private lateinit var store: ModelStore
+    private lateinit var appContext: Context
 
     private val _state = MutableStateFlow<State>(State.Missing)
     val state: StateFlow<State> = _state
@@ -54,12 +72,19 @@ object AssistantEngine {
     private var helper = 0L
     /** Each mode's system prompt decoded once: the state after it, and how many tokens it holds. */
     private val prefixes = HashMap<Int, Pair<ByteArray, Int>>()
+    /** What the loaded weights are, so a prefix state saved from a different model is never restored into this one. */
+    private var modelKey = ""
 
     private var holders = 0
     private var idleJob: Job? = null
     private var askJob: Job? = null
 
-    fun init(context: Context) { if (!::store.isInitialized) store = ModelStore(context.applicationContext) }
+    fun init(context: Context) {
+        if (!::store.isInitialized) {
+            appContext = context.applicationContext
+            store = ModelStore(appContext)
+        }
+    }
 
     @Synchronized fun acquire() { holders++; idleJob?.cancel(); idleJob = null }
 
@@ -75,12 +100,15 @@ object AssistantEngine {
         if (store.find() == null) store.waiting()?.let { runCatching { store.moveIn(it) { } } }
         val file = store.find() ?: return State.Missing.also { _state.value = it }
         _state.value = State.Loading(file.name)
+        val t0 = System.nanoTime()
         val next = runCatching {
             unloadNow(keepState = true)
             chat = Llm.nativeLoad(file.absolutePath, CONTEXT, threads)
+            modelKey = "${file.name}:${file.length()}:${file.lastModified()}"
             State.Ready(file.name, Llm.nativeCtx(chat))
         }.getOrElse { State.Failed(it.message ?: it.toString()) }
         _state.value = next
+        Log.i(TAG, "model load ${elapsed(t0)} ms -> $next")
         return next
     }
 
@@ -115,30 +143,96 @@ object AssistantEngine {
     fun ask(query: String, context: String?, mode: Int, listener: Listener) {
         cancel()
         askJob = scope.launch {
+            val t0 = System.nanoTime()
             val job = coroutineContext[Job]
             val state = loadNow()
             if (state !is State.Ready) { listener.onError(if (state is State.Failed) state.why else "No model in Uno Lab"); return@launch }
             runCatching {
                 if (helper == 0L) helper = Llm.nativeNewContext(chat, HELPER_CONTEXT, threads)
                 startFrom(mode)
+                val tPre = System.nanoTime()
                 val pre = Llm.nativePrefill(helper, Assistant.turn(query, context))
+                Log.i(TAG, "prefill ${elapsed(tPre)} ms (${pre[0].toInt()} tok)")
                 // A question replaced while it was still being read is dropped here, before anything is written for it.
                 if (job?.isActive != true) return@launch
                 val h = helper
+                var first = 0L
                 val gen = Llm.nativeGenerate(h, Assistant.maxTokens(mode), Assistant.temperature(mode), .9f, 20,
                     Assistant.grammar(mode)) { bytes ->
+                    if (first == 0L) {
+                        first = System.nanoTime()
+                        Log.i(TAG, "first token ${elapsed(t0)} ms after the ask")
+                    }
                     if (job.isActive) listener.onPiece(String(bytes, Charsets.UTF_8)) else Llm.nativeStop(h)
                 }
                 if (job.isActive) listener.onDone((pre[1] + gen[1]).toLong(), gen[0].toInt())
+                Log.i(TAG, "turn ${elapsed(t0)} ms, mode $mode, ${gen[0].toInt()} tok")
             }.onFailure { listener.onError(it.message ?: it.toString()) }
         }
     }
 
-    /** Puts the helper at the end of [mode]'s system prompt: from its saved state, or decoded and saved the first time. */
+    /** Puts the helper at the end of [mode]'s system prompt: from the in-memory state, the one saved on disk, or decoded afresh. */
     private fun startFrom(mode: Int) {
-        prefixes[mode]?.let { (bytes, n) -> if (Llm.nativeRestoreState(helper, bytes, n)) return }
+        val t0 = System.nanoTime()
+        prefixes[mode]?.let { (bytes, n) ->
+            if (Llm.nativeRestoreState(helper, bytes, n)) { Log.i(TAG, "prefix $mode from memory ${elapsed(t0)} ms"); return }
+        }
+        savedPrefix(mode)?.let { (bytes, n) ->
+            if (Llm.nativeRestoreState(helper, bytes, n)) {
+                prefixes[mode] = bytes to n
+                Log.i(TAG, "prefix $mode from disk ${elapsed(t0)} ms")
+                return
+            }
+        }
         Llm.nativeReset(helper)
         val pre = Llm.nativePrefill(helper, Assistant.prefix(mode))
-        prefixes[mode] = Llm.nativeSaveState(helper) to pre[0].toInt()
+        val bytes = Llm.nativeSaveState(helper)
+        prefixes[mode] = bytes to pre[0].toInt()
+        Log.i(TAG, "prefix $mode decoded ${elapsed(t0)} ms (${pre[0].toInt()} tok, ${bytes.size / 1024} KB)")
+        savePrefixAsync(mode, bytes, pre[0].toInt())
+    }
+
+    private fun elapsed(t0: Long) = (System.nanoTime() - t0) / 1_000_000
+
+    private fun prefixFile(mode: Int) = File(File(appContext.filesDir, "prefix"), "mode-$mode.bin")
+
+    /** A prefix state is only valid for the weights and the prompt it was decoded from. */
+    private fun fingerprint(mode: Int): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        digest.update(modelKey.toByteArray())
+        digest.update(byteArrayOf(0))
+        digest.update(mode.toString().toByteArray())
+        digest.update(byteArrayOf(0))
+        digest.update(Assistant.prefix(mode).toByteArray())
+        return digest.digest().joinToString("") { "%02x".format(it) }.take(16)
+    }
+
+    private fun savedPrefix(mode: Int): Pair<ByteArray, Int>? = runCatching {
+        val file = prefixFile(mode)
+        if (!file.exists()) return@runCatching null
+        DataInputStream(file.inputStream().buffered()).use { input ->
+            val n = input.readInt()
+            val fp = ByteArray(input.readInt()).also { input.readFully(it) }
+            if (String(fp, Charsets.UTF_8) != fingerprint(mode)) return@runCatching null
+            val len = input.readInt()
+            if (len <= 0 || len > MAX_PREFIX_BYTES) return@runCatching null
+            ByteArray(len).also { input.readFully(it) } to n
+        }
+    }.getOrNull()
+
+    private fun savePrefixAsync(mode: Int, bytes: ByteArray, n: Int) {
+        if (bytes.size > MAX_PREFIX_BYTES) return
+        val fp = fingerprint(mode).toByteArray()
+        val file = prefixFile(mode)
+        ioScope.launch {
+            runCatching {
+                file.parentFile?.mkdirs()
+                val tmp = File(file.parentFile, file.name + ".tmp")
+                DataOutputStream(tmp.outputStream().buffered()).use { out ->
+                    out.writeInt(n); out.writeInt(fp.size); out.write(fp); out.writeInt(bytes.size); out.write(bytes)
+                }
+                if (!tmp.renameTo(file)) tmp.delete()
+            }
+        }
     }
 }

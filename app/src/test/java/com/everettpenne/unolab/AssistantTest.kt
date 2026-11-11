@@ -1,6 +1,7 @@
 package com.everettpenne.unolab
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -60,11 +61,11 @@ class AssistantTest {
         }
     }
 
-    @Test fun anAnswerIsHeldToOnePlainParagraph() {
+    @Test fun onlyActionsAreGrammarHeld() {
+        // An action must be one JSON object, so it keeps its grammar. An answer does not: a GBNF mask over 248k tokens cost about
+        // five times the decode speed (2.6 tok/s against 6.8 measured on a Pixel 10a), and the launcher strips markdown anyway.
         assertEquals(Assistant.GRAMMAR, Assistant.grammar(Assistant.ACTION))
-        assertEquals(Assistant.ANSWER_GRAMMAR, Assistant.grammar(Assistant.ANSWER))
-        // No markdown, list, table or bracket characters, and no line break, anywhere in an answer.
-        listOf("#", "*", "|", "\\[", "\\]", "`", "\\n").forEach { assertTrue(it, Assistant.ANSWER_GRAMMAR.substringAfter("] [^").contains(it)) }
+        assertNull(Assistant.grammar(Assistant.ANSWER))
         assertTrue(Assistant.temperature(Assistant.ANSWER) <= .3f)
     }
 

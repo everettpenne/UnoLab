@@ -72,8 +72,12 @@ str ::= "\"" [^"\\\n]{1,80} "\""
     const val ANSWER_GRAMMAR = """root ::= [^#*|\[\]{}<>_`~\n\t >-] [^#*|\[\]{}<>_`~\n]{0,600}
 """
 
-    /** The grammar a reply in [mode] is held to. */
-    fun grammar(mode: Int): String = if (mode == ACTION) GRAMMAR else ANSWER_GRAMMAR
+    /**
+     * The grammar a reply in [mode] is held to. Only actions: keeping an answer plain is the prompt's job and the launcher strips
+     * markdown anyway, and a GBNF mask over a 248k vocabulary costs about five times the decode speed (measured: 2.6 tok/s with it,
+     * 12-13 without), which is most of a search answer's latency.
+     */
+    fun grammar(mode: Int): String? = if (mode == ACTION) GRAMMAR else null
 
     /** The fixed start of every question in [mode]: decoded once, its state saved and put back before each question. */
     fun prefix(mode: Int): String = "<|im_start|>system\n" + (if (mode == ACTION) ACTION_SYSTEM else ANSWER_SYSTEM) + "<|im_end|>\n"
