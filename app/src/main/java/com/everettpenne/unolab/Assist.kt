@@ -50,3 +50,17 @@ internal class AssistSession(context: Context) : VoiceInteractionSession(context
         finish()
     }
 }
+
+/**
+ * The role check requires a recognition service beside the session service (AssistantRoleBehavior rejects the package without one), but there
+ * is no voice here: a sideloaded app cannot hold `CAPTURE_AUDIO_HOTWORD`, so nothing ever starts listening. If something does, it is told the
+ * client is at fault rather than being left waiting.
+ */
+class AssistRecognitionService : android.speech.RecognitionService() {
+    override fun onStartListening(recognizerIntent: android.content.Intent, listener: Callback) {
+        listener.error(android.speech.SpeechRecognizer.ERROR_CLIENT)
+    }
+
+    override fun onStopListening(listener: Callback) = Unit
+    override fun onCancel(listener: Callback) = Unit
+}

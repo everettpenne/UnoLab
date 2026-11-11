@@ -40,5 +40,9 @@
         </service>
         <service android:name=".AssistSessionService" android:exported="true"
             android:permission="android.permission.BIND_VOICE_INTERACTION" />
+        <!-- Declared only because the role check demands a recognitionService attribute next to the session service. Nothing listens: a
+             sideloaded app cannot hold the privileged hotword permission, so there is no voice and no "Hey Qwen". -->
+        <service android:name=".AssistRecognitionService" android:exported="true"
+            android:permission="android.permission.BIND_SPEECH_RECOGNITION_SERVICE" />
     </application>
 </manifest>
