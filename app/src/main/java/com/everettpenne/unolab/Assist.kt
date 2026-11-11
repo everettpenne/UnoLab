@@ -16,6 +16,8 @@ import android.service.voice.VoiceInteractionSessionService
  */
 internal object AssistEntry {
     const val LAUNCHER = "com.jake.duolauncher"
+    /** The first Uno Launcher whose search opens over the app in front (0.132.5-uno01). */
+    const val OVER_APP_VERSION = 208L
 
     /** Where the assist gesture should land: Uno's search, or — when the launcher is not installed — Uno Lab itself. */
     fun intent(context: Context, screenText: String?): Intent {
@@ -41,12 +43,17 @@ private fun launcherIntent(context: Context): Intent? {
     fun named(activity: String): Intent? =
         Intent(Intent.ACTION_MAIN).setClassName(AssistEntry.LAUNCHER, AssistEntry.LAUNCHER + "." + activity)
             .takeIf { runCatching { pm.resolveActivity(it, 0) }.getOrNull() != null }
-    // Home's activity: search opens with the launcher, as it always has. The floating window (.search.AssistActivity) is not used yet — it
-    // does not paint its panel in a standalone activity — so naming it here would give a blank screen instead of search.
-    return named("MainActivity")
-        ?: named("search.AssistActivity")
+    // From Uno Launcher 0.132.5 (versionCode 208) its .search.AssistActivity puts search over the app in front, so dismissing it returns there;
+    // in older versions that activity is the floating window that could crash, so Home's activity is named instead, as it always was.
+    val overApp = launcherVersion(context) >= AssistEntry.OVER_APP_VERSION
+    return (if (overApp) named("search.AssistActivity") else null)
+        ?: named("MainActivity")
         ?: runCatching { pm.getLaunchIntentForPackage(AssistEntry.LAUNCHER) }.getOrNull()
 }
+
+private fun launcherVersion(context: Context): Long = runCatching {
+    context.packageManager.getPackageInfo(AssistEntry.LAUNCHER, 0).longVersionCode
+}.getOrDefault(0L)
 
 /** The role is only offered when the app has a service for it; this is that service. It has nothing of its own to do. */
 class AssistService : VoiceInteractionService()
