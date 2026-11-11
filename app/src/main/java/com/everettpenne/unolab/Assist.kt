@@ -38,8 +38,13 @@ internal object AssistEntry {
  */
 private fun launcherIntent(context: Context): Intent? {
     val pm = context.packageManager
-    val named = Intent(Intent.ACTION_MAIN).setClassName(AssistEntry.LAUNCHER, AssistEntry.LAUNCHER + ".MainActivity")
-    return named.takeIf { runCatching { pm.resolveActivity(it, 0) }.getOrNull() != null }
+    fun named(activity: String): Intent? =
+        Intent(Intent.ACTION_MAIN).setClassName(AssistEntry.LAUNCHER, AssistEntry.LAUNCHER + "." + activity)
+            .takeIf { runCatching { pm.resolveActivity(it, 0) }.getOrNull() != null }
+    // Search over the app, in its own translucent task. Older launchers only have Home's activity (which takes the person Home), and
+    // anything older still falls back to Uno Lab itself.
+    return named("search.AssistActivity")
+        ?: named("MainActivity")
         ?: runCatching { pm.getLaunchIntentForPackage(AssistEntry.LAUNCHER) }.getOrNull()
 }
 
