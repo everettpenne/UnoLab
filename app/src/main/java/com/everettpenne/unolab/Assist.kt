@@ -41,10 +41,10 @@ private fun launcherIntent(context: Context): Intent? {
     fun named(activity: String): Intent? =
         Intent(Intent.ACTION_MAIN).setClassName(AssistEntry.LAUNCHER, AssistEntry.LAUNCHER + "." + activity)
             .takeIf { runCatching { pm.resolveActivity(it, 0) }.getOrNull() != null }
-    // Search over the app, in its own translucent task. Older launchers only have Home's activity (which takes the person Home), and
-    // anything older still falls back to Uno Lab itself.
-    return named("search.AssistActivity")
-        ?: named("MainActivity")
+    // Home's activity: search opens with the launcher, as it always has. The floating window (.search.AssistActivity) is not used yet — it
+    // does not paint its panel in a standalone activity — so naming it here would give a blank screen instead of search.
+    return named("MainActivity")
+        ?: named("search.AssistActivity")
         ?: runCatching { pm.getLaunchIntentForPackage(AssistEntry.LAUNCHER) }.getOrNull()
 }
 
