@@ -19,7 +19,7 @@ internal object AssistEntry {
 
     /** Where the assist gesture should land: Uno's search, or — when the launcher is not installed — Uno Lab itself. */
     fun intent(context: Context, screenText: String?): Intent {
-        val launcher = runCatching { context.packageManager.getLaunchIntentForPackage(LAUNCHER) }.getOrNull()
+        val launcher = launcherIntent(context)
         val intent = launcher ?: Intent(context, MainActivity::class.java)
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         if (launcher != null) {
@@ -32,6 +32,17 @@ internal object AssistEntry {
     }
 }
 
+/**
+ * Uno Launcher's own activity. A home app carries no `CATEGORY_LAUNCHER` filter, so `getLaunchIntentForPackage` returns null for it and the
+ * hand-off would land in Uno Lab itself; the activity is named directly instead.
+ */
+private fun launcherIntent(context: Context): Intent? {
+    val pm = context.packageManager
+    val named = Intent(Intent.ACTION_MAIN).setClassName(AssistEntry.LAUNCHER, AssistEntry.LAUNCHER + ".MainActivity")
+    return named.takeIf { runCatching { pm.resolveActivity(it, 0) }.getOrNull() != null }
+        ?: runCatching { pm.getLaunchIntentForPackage(AssistEntry.LAUNCHER) }.getOrNull()
+}
+
 /** The role is only offered when the app has a service for it; this is that service. It has nothing of its own to do. */
 class AssistService : VoiceInteractionService()
 
@@ -40,27 +51,45 @@ class AssistSessionService : VoiceInteractionSessionService() {
     override fun onNewSession(args: Bundle?): VoiceInteractionSession = AssistSession(this)
 }
 
-/** Reads the screen once, opens Uno's search with the text, and gets out of the way. */
+/**
+ * Opens Uno's search as soon as the session is shown, and takes the screen's text with it if it arrives quickly.
+ *
+ * `onHandleAssist` is not dependable on its own: a launcher or a home screen often hands over no assist structure at all, and then the
+ * session would sit there waiting for data that never comes while the user stares at an empty overlay. So `onShow` opens search straight
+ * away, a short grace period later, and `onHandleAssist` jumps that queue when it does fire.
+ */
 internal class AssistSession(context: Context) : VoiceInteractionSession(context) {
+    private var text: String? = null
+    private var opened = false
+    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val open = Runnable { launch() }
+
+    override fun onShow(args: Bundle?, showFlags: Int) {
+        // Assist data usually lands just after the session is shown; wait for it, but never for long.
+        handler.postDelayed(open, GRACE_MS)
+    }
+
     override fun onHandleAssist(data: Bundle?, structure: android.app.assist.AssistStructure?, content: android.app.assist.AssistContent?) {
+        text = runCatching { ScreenText.from(structure) }.getOrNull()
+        handler.removeCallbacks(open)
+        launch()
+    }
+
+    override fun onHide() {
+        handler.removeCallbacks(open)
+    }
+
+    private fun launch() {
+        if (opened) return
+        opened = true
         val app = context.applicationContext
-        val text = runCatching { ScreenText.from(structure) }.getOrNull()
         runCatching { startAssistantActivity(AssistEntry.intent(app, text)) }
             .onFailure { runCatching { startAssistantActivity(AssistEntry.intent(app, null)) } }
         finish()
     }
-}
 
-/**
- * The role check requires a recognition service beside the session service (AssistantRoleBehavior rejects the package without one), but there
- * is no voice here: a sideloaded app cannot hold `CAPTURE_AUDIO_HOTWORD`, so nothing ever starts listening. If something does, it is told the
- * client is at fault rather than being left waiting.
- */
-class AssistRecognitionService : android.speech.RecognitionService() {
-    override fun onStartListening(recognizerIntent: android.content.Intent, listener: Callback) {
-        listener.error(android.speech.SpeechRecognizer.ERROR_CLIENT)
+    private companion object {
+        /** How long a session waits for the screen's text before opening search without it. */
+        const val GRACE_MS = 250L
     }
-
-    override fun onStopListening(listener: Callback) = Unit
-    override fun onCancel(listener: Callback) = Unit
 }

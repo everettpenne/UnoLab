@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The role's session: it reads the screen once and opens Uno's search. The recognition service is required by the framework's role
-     check (AssistantRoleBehavior needs sessionService, recognitionService and supportsAssist all present) even though there is no hotword:
-     a sideloaded app cannot hold the privileged hotword permission, so nothing ever asks that service to listen. -->
-<voice-interaction-service android:sessionService=".AssistSessionService"
-    android:recognitionService=".AssistRecognitionService" android:supportsAssist="true"
+<!-- Fully qualified: the framework resolves these against the package name, which is not the same as the Kotlin package in a build with
+     an applicationIdSuffix. The recognition service is required by the role check even though nothing ever listens (no hotword). -->
+<voice-interaction-service
+    android:sessionService="com.everettpenne.unolab.AssistSessionService"
+    android:recognitionService="com.everettpenne.unolab.AssistRecognitionService"
+    android:supportsAssist="true"
     xmlns:android="http://schemas.android.com/apk/res/android" />
