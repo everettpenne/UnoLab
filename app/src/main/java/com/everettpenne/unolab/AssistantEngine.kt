@@ -218,6 +218,7 @@ object AssistantEngine {
             }
         }.onFailure { return@withContext Planner.error(it.message ?: "The planner failed.") }
         Log.i(TAG, "plan ${elapsed(t0)} ms (${prepared[0].toInt()} tok in, ${reply.length} chars out)")
+        Log.i(TAG, "plan reply: ${reply.toString().trim()}")
         reply.toString().trim()
     }
 
