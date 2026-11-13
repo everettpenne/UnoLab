@@ -71,8 +71,9 @@ object AssistantEngine {
     /** The chat's context, which owns the weights; 0 when nothing is loaded. Read and used on [dispatcher] only. */
     var chat = 0L; private set
     private var helper = 0L
-    /** Each mode's system prompt decoded once: the state after it, and how many tokens it holds. */
-    private val prefixes = HashMap<Int, Pair<ByteArray, Int>>()
+    /** Each fixed prompt decoded once, keyed by mode ("m0", "m1") or by a planner catalogue hash ("plan-…"): the state after it, and how
+     *  many tokens it holds. */
+    private val prefixes = HashMap<String, Pair<ByteArray, Int>>()
     /** What the loaded weights are, so a prefix state saved from a different model is never restored into this one. */
     private var modelKey = ""
 
@@ -150,7 +151,7 @@ object AssistantEngine {
             if (state !is State.Ready) { listener.onError(if (state is State.Failed) state.why else "No model in Uno Lab"); return@launch }
             runCatching {
                 if (helper == 0L) helper = Llm.nativeNewContext(chat, HELPER_CONTEXT, threads)
-                startFrom(mode)
+                startFrom("m$mode", Assistant.prefix(mode))
                 val tPre = System.nanoTime()
                 val pre = Llm.nativePrefill(helper, Assistant.turn(query, context))
                 Log.i(TAG, "prefill ${elapsed(tPre)} ms (${pre[0].toInt()} tok)")
@@ -172,59 +173,86 @@ object AssistantEngine {
         }
     }
 
-    /** Puts the helper at the end of [mode]'s system prompt: from the in-memory state, the one saved on disk, or decoded afresh. */
-    private fun startFrom(mode: Int) {
+    /** Puts the helper at the end of a fixed prompt: from the in-memory state, the one saved on disk, or decoded afresh. */
+    private fun startFrom(key: String, prefixText: String) {
         val t0 = System.nanoTime()
-        prefixes[mode]?.let { (bytes, n) ->
-            if (Llm.nativeRestoreState(helper, bytes, n)) { Log.i(TAG, "prefix $mode from memory ${elapsed(t0)} ms"); return }
+        prefixes[key]?.let { (bytes, n) ->
+            if (Llm.nativeRestoreState(helper, bytes, n)) { Log.i(TAG, "prefix $key from memory ${elapsed(t0)} ms"); return }
         }
-        savedPrefix(mode)?.let { (bytes, n) ->
+        savedPrefix(key, prefixText)?.let { (bytes, n) ->
             if (Llm.nativeRestoreState(helper, bytes, n)) {
-                prefixes[mode] = bytes to n
-                Log.i(TAG, "prefix $mode from disk ${elapsed(t0)} ms")
+                prefixes[key] = bytes to n
+                Log.i(TAG, "prefix $key from disk ${elapsed(t0)} ms")
                 return
             }
         }
         Llm.nativeReset(helper)
-        val pre = Llm.nativePrefill(helper, Assistant.prefix(mode))
+        val pre = Llm.nativePrefill(helper, prefixText)
         val bytes = Llm.nativeSaveState(helper)
-        prefixes[mode] = bytes to pre[0].toInt()
-        Log.i(TAG, "prefix $mode decoded ${elapsed(t0)} ms (${pre[0].toInt()} tok, ${bytes.size / 1024} KB)")
-        savePrefixAsync(mode, bytes, pre[0].toInt())
+        prefixes[key] = bytes to pre[0].toInt()
+        Log.i(TAG, "prefix $key decoded ${elapsed(t0)} ms (${pre[0].toInt()} tok, ${bytes.size / 1024} KB)")
+        savePrefixAsync(key, prefixText, bytes, pre[0].toInt())
+    }
+
+    /**
+     * Answers the launcher's planner request: the tool catalogue and the grammar arrive in [requestJson], so a new tool needs no change
+     * here. The prompt (instructions and catalogue) is decoded once per catalogue and cached under its hash, like the other prefixes, and the
+     * reply is held to the grammar the launcher generated.
+     */
+    suspend fun plan(requestJson: String): String = withContext(dispatcher) {
+        val request = Planner.parse(requestJson) ?: return@withContext Planner.error("I couldn't read the planner request.")
+        val state = loadNow()
+        if (state !is State.Ready) {
+            return@withContext Planner.error(if (state is State.Failed) state.why else "No model in Uno Lab")
+        }
+        if (helper == 0L) helper = Llm.nativeNewContext(chat, HELPER_CONTEXT, threads)
+        val t0 = System.nanoTime()
+        val prepared = runCatching {
+            startFrom("plan-${request.hash}", Planner.prefix(request))
+            Llm.nativePrefill(helper, Planner.turn(request))
+        }.getOrElse { return@withContext Planner.error(it.message ?: "The request was too long for the assistant.") }
+        val reply = StringBuilder()
+        runCatching {
+            Llm.nativeGenerate(helper, Planner.MAX_TOKENS, Planner.TEMPERATURE, .95f, 20, request.grammar) { bytes ->
+                reply.append(String(bytes, Charsets.UTF_8))
+            }
+        }.onFailure { return@withContext Planner.error(it.message ?: "The planner failed.") }
+        Log.i(TAG, "plan ${elapsed(t0)} ms (${prepared[0].toInt()} tok in, ${reply.length} chars out)")
+        reply.toString().trim()
     }
 
     private fun elapsed(t0: Long) = (System.nanoTime() - t0) / 1_000_000
 
-    private fun prefixFile(mode: Int) = File(File(appContext.filesDir, "prefix"), "mode-$mode.bin")
+    private fun prefixFile(key: String) = File(File(appContext.filesDir, "prefix"), "$key.bin")
 
     /** A prefix state is only valid for the weights and the prompt it was decoded from. */
-    private fun fingerprint(mode: Int): String {
+    private fun fingerprint(key: String, prefixText: String): String {
         val digest = MessageDigest.getInstance("SHA-256")
         digest.update(modelKey.toByteArray())
         digest.update(byteArrayOf(0))
-        digest.update(mode.toString().toByteArray())
+        digest.update(key.toByteArray())
         digest.update(byteArrayOf(0))
-        digest.update(Assistant.prefix(mode).toByteArray())
+        digest.update(prefixText.toByteArray())
         return digest.digest().joinToString("") { "%02x".format(it) }.take(16)
     }
 
-    private fun savedPrefix(mode: Int): Pair<ByteArray, Int>? = runCatching {
-        val file = prefixFile(mode)
+    private fun savedPrefix(key: String, prefixText: String): Pair<ByteArray, Int>? = runCatching {
+        val file = prefixFile(key)
         if (!file.exists()) return@runCatching null
         DataInputStream(file.inputStream().buffered()).use { input ->
             val n = input.readInt()
             val fp = ByteArray(input.readInt()).also { input.readFully(it) }
-            if (String(fp, Charsets.UTF_8) != fingerprint(mode)) return@runCatching null
+            if (String(fp, Charsets.UTF_8) != fingerprint(key, prefixText)) return@runCatching null
             val len = input.readInt()
             if (len <= 0 || len > MAX_PREFIX_BYTES) return@runCatching null
             ByteArray(len).also { input.readFully(it) } to n
         }
     }.getOrNull()
 
-    private fun savePrefixAsync(mode: Int, bytes: ByteArray, n: Int) {
+    private fun savePrefixAsync(key: String, prefixText: String, bytes: ByteArray, n: Int) {
         if (bytes.size > MAX_PREFIX_BYTES) return
-        val fp = fingerprint(mode).toByteArray()
-        val file = prefixFile(mode)
+        val fp = fingerprint(key, prefixText).toByteArray()
+        val file = prefixFile(key)
         ioScope.launch {
             runCatching {
                 file.parentFile?.mkdirs()

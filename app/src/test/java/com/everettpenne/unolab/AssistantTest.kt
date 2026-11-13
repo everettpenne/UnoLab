@@ -39,8 +39,8 @@ class AssistantTest {
         assertFalse(long.contains("x".repeat(Assistant.MAX_CONTEXT + 1)))
     }
 
-    @Test fun versionOneHasAskWithContext() {
-        assertEquals(1, Assistant.VERSION)
+    @Test fun theVersionSaysWhatThisLabCanDo() {
+        assertEquals(2, Assistant.VERSION)  // 1 added askWithContext, 2 added plan
         val methods = IAssistant::class.java.methods.map { it.name }
         assertTrue(methods.containsAll(listOf("version", "askWithContext")))
     }

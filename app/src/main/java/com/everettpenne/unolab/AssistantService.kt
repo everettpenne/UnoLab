@@ -31,6 +31,12 @@ class AssistantService : Service() {
         override fun askWithContext(query: String?, context: String?, mode: Int, sink: IAnswerSink?) { check(); answer(query, context, mode, sink) }
 
         override fun cancel() { check(); AssistantEngine.cancel() }
+
+        /** Synchronous on the caller's binder thread: the launcher asks from its own background thread and waits for the plan. */
+        override fun plan(request: String?): String {
+            check()
+            return kotlinx.coroutines.runBlocking { AssistantEngine.plan(request.orEmpty()) }
+        }
     }
 
     private fun answer(query: String?, context: String?, mode: Int, sink: IAnswerSink?) {

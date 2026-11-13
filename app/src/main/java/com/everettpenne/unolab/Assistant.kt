@@ -11,8 +11,8 @@ object Assistant {
     const val MAX_QUERY = 500
     /** Phone context longer than this is cut: Uno sends a few short lines, and every token of it is read before the answer starts. */
     const val MAX_CONTEXT = 2000
-    /** What [IAssistant.version] answers: 1 added askWithContext. An older Uno Lab has no version() and so reads as 0. */
-    const val VERSION = 1
+    /** What [IAssistant.version] answers: 1 added askWithContext, 2 added plan. An older Uno Lab has no version() and reads as 0. */
+    const val VERSION = 2
 
     /** Said in both prompts, since Uno may put what the phone knows (date, battery, alarm…) before the question. */
     private const val CONTEXT_RULE = "The user's message may start with phone context from this phone; use it when it answers the question and never invent it."
