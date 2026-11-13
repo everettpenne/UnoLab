@@ -8,13 +8,30 @@
 #include <chrono>
 #include <string>
 #include <vector>
+#include <sched.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/system_properties.h>
 #include "llama.h"
+#include "ggml-cpu.h"
 
 #define TAG "UnoLabLlm"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
 namespace {
+
+// What the threads are run with when no property says otherwise (see Tuning). Chosen from measurements on a Pixel 10a (Tensor G4),
+// asking from Uno's search with Uno Lab in the background, where Android allows the process cores 0 to 6 (not the one fastest core):
+//   4 threads, made per call (0.3.8):  reads the prompt at ~36 tok/s, writes at 4.9 to 5.1 tok/s
+//   4 threads in a pool:               ~40 tok/s, 6.6 to 7.2 tok/s
+//   3 threads in a pool (one per allowed fast core): ~51 tok/s, 7.7 to 10.3 tok/s
+//   more threads for reading than writing (6), 2 for writing, a raised priority, no polling: no better
+//   4 threads kept to "the four fastest cores": 0.8 tok/s, since one of those is not allowed and four spinning threads shared three cores
+constexpr int DEFAULT_THREADS_BATCH = 0; // 0: the same as the decode threads
+constexpr int DEFAULT_POOL = 1;
+constexpr int DEFAULT_POLL = 50;
+constexpr int DEFAULT_PRIO = 0;
 
 struct Session {
     llama_model* model = nullptr;
@@ -26,7 +43,129 @@ struct Session {
     std::atomic<bool> stop{false};
     // A second context on the same weights (nativeNewContext) does not own the model; free it before the one that does.
     bool ownsModel = true;
+    // Threads the context was made with, the worker pools attached to it (see applyTuning), and the tuning they were made for.
+    int threads = 4;
+    ggml_threadpool* pool = nullptr;
+    ggml_threadpool* poolBatch = nullptr;
+    std::string tuned;
 };
+
+// How the context's threads are run. Decoding reads every weight for each token, so it is bound by memory bandwidth and by its slowest
+// thread: the phone's scheduler moving one of them to a little core (or a fresh set of threads being made for every token, which llama.cpp
+// does when no pool is attached) costs far more than it looks. So the threads live in a pool, kept on the phone's fastest cores.
+// Each value can be overridden with a system property (adb shell setprop debug.unolab.<name> <n>) to measure on a phone without a rebuild.
+struct Tuning {
+    int threads;      // threads for writing the answer (decode)
+    int threadsBatch; // threads for reading the prompt (prefill)
+    int pool;         // 0: no pool (threads made per call); 1: a pool, placed by the scheduler; 2: a pool kept on the fastest cores
+    int poll;         // how hard idle pool threads spin before sleeping, 0 to 100
+    int prio;         // ggml_sched_priority for the pool's threads, 0 (normal) to 3
+    std::string key() const {
+        char b[64]; snprintf(b, sizeof(b), "%d/%d/%d/%d/%d", threads, threadsBatch, pool, poll, prio); return b;
+    }
+};
+
+int propInt(const char* name, int fallback) {
+    char value[PROP_VALUE_MAX] = {0};
+    if (__system_property_get(name, value) <= 0) return fallback;
+    char* end = nullptr;
+    long v = strtol(value, &end, 10);
+    return end != value ? (int)v : fallback;
+}
+
+std::vector<int> coresFastestFirst();
+
+// One thread for each fast core the process may run on right now, and never more than the context was made for. Android gives a
+// background process fewer cores than the app in front (on a Tensor G4: three of the four fast ones), and a thread more than there are
+// fast cores lands on a little core, which every step then waits for.
+int fastCoresAllowed(int most) {
+    cpu_set_t allowed;
+    CPU_ZERO(&allowed);
+    if (sched_getaffinity(0, sizeof(allowed), &allowed) != 0) return most;
+    std::vector<int> cores = coresFastestFirst();
+    if (cores.empty()) return most;
+    auto hz = [](int cpu) {
+        char path[96]; long v = 0;
+        snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", cpu);
+        if (FILE* f = fopen(path, "r")) { if (fscanf(f, "%ld", &v) != 1) v = 0; fclose(f); }
+        return v;
+    };
+    long slowest = hz(cores.back()), fastestHz = hz(cores.front());
+    int n = 0;
+    for (int cpu : cores) if (CPU_ISSET(cpu, &allowed) && (fastestHz == slowest || hz(cpu) > slowest)) n++;
+    return std::clamp(n, 1, most);
+}
+
+Tuning tuningFor(const Session* s) {
+    Tuning t;
+    t.threads = std::clamp(propInt("debug.unolab.threads", fastCoresAllowed(s->threads)), 1, 8);
+    t.threadsBatch = std::clamp(propInt("debug.unolab.tbatch", DEFAULT_THREADS_BATCH > 0 ? DEFAULT_THREADS_BATCH : t.threads), 1, 8);
+    t.pool = std::clamp(propInt("debug.unolab.pool", DEFAULT_POOL), 0, 2);
+    t.poll = std::clamp(propInt("debug.unolab.poll", DEFAULT_POLL), 0, 100);
+    t.prio = std::clamp(propInt("debug.unolab.prio", DEFAULT_PRIO), 0, 3);
+    return t;
+}
+
+// The phone's cores, fastest first (by their top frequency), so a pool of n threads can be kept on the n fastest.
+std::vector<int> coresFastestFirst() {
+    std::vector<std::pair<long, int>> cores;
+    for (int cpu = 0; cpu < 64; cpu++) {
+        char path[96];
+        snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", cpu);
+        FILE* f = fopen(path, "r");
+        if (!f) break;
+        long hz = 0;
+        if (fscanf(f, "%ld", &hz) != 1) hz = 0;
+        fclose(f);
+        cores.push_back({hz, cpu});
+    }
+    std::stable_sort(cores.begin(), cores.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+    std::vector<int> out;
+    for (auto& c : cores) out.push_back(c.second);
+    return out;
+}
+
+ggml_threadpool* newPool(int n, const Tuning& t, const std::vector<int>& fastest) {
+    ggml_threadpool_params p = ggml_threadpool_params_default(n);
+    p.poll = (uint32_t)t.poll;
+    p.prio = (ggml_sched_priority)t.prio;
+    if (t.pool == 2 && !fastest.empty()) {
+        // Every thread may use any of the n fastest cores (not one core each: the scheduler still balances among them).
+        for (int i = 0; i < n && i < (int)fastest.size(); i++) if (fastest[i] < GGML_MAX_N_THREADS) p.cpumask[fastest[i]] = true;
+        p.strict_cpu = false;
+    }
+    return ggml_threadpool_new(&p);
+}
+
+void freePools(Session* s) {
+    if (s->ctx) llama_detach_threadpool(s->ctx);
+    if (s->poolBatch && s->poolBatch != s->pool) ggml_threadpool_free(s->poolBatch);
+    if (s->pool) ggml_threadpool_free(s->pool);
+    s->pool = s->poolBatch = nullptr;
+}
+
+// Brings the context's threads in line with the tuning, if it changed. Called on the model's thread before prompt reading and writing.
+void applyTuning(Session* s) {
+    Tuning t = tuningFor(s);
+    std::string key = t.key();
+    if (key == s->tuned) return;
+    freePools(s);
+    llama_set_n_threads(s->ctx, t.threads, t.threadsBatch);
+    // Kept to the fastest cores (pool 2) only among those the process is allowed: naming one it is not allowed squeezed the threads
+    // onto the rest.
+    std::vector<int> fastest;
+    cpu_set_t allowed;
+    CPU_ZERO(&allowed);
+    bool known = sched_getaffinity(0, sizeof(allowed), &allowed) == 0;
+    for (int cpu : coresFastestFirst()) if (!known || CPU_ISSET(cpu, &allowed)) fastest.push_back(cpu);
+    if (t.pool > 0) {
+        s->pool = newPool(t.threads, t, fastest);
+        s->poolBatch = t.threadsBatch == t.threads ? s->pool : newPool(t.threadsBatch, t, fastest);
+        if (s->pool && s->poolBatch) llama_attach_threadpool(s->ctx, s->pool, s->poolBatch);
+    }
+    s->tuned = key;
+    LOGI("tuning: threads=%d batch=%d pool=%d poll=%d prio=%d", t.threads, t.threadsBatch, t.pool, t.poll, t.prio);
+}
 
 double nowMs() {
     using namespace std::chrono;
@@ -90,6 +229,7 @@ JNIEXPORT jlong JNICALL Java_com_everettpenne_unolab_Llm_nativeLoad(JNIEnv* env,
     auto* s = new Session();
     s->model = model; s->ctx = ctx; s->vocab = llama_model_get_vocab(model);
     s->nCtx = (int)llama_n_ctx(ctx);
+    s->threads = threads;
     LOGI("loaded: n_ctx=%d threads=%d", s->nCtx, threads);
     return reinterpret_cast<jlong>(s);
 }
@@ -97,6 +237,7 @@ JNIEXPORT jlong JNICALL Java_com_everettpenne_unolab_Llm_nativeLoad(JNIEnv* env,
 JNIEXPORT void JNICALL Java_com_everettpenne_unolab_Llm_nativeFree(JNIEnv*, jobject, jlong h) {
     auto* s = reinterpret_cast<Session*>(h);
     if (!s) return;
+    freePools(s);
     llama_free(s->ctx);
     if (s->ownsModel) llama_model_free(s->model);
     delete s;
@@ -112,6 +253,7 @@ JNIEXPORT jlong JNICALL Java_com_everettpenne_unolab_Llm_nativeNewContext(JNIEnv
     auto* s = new Session();
     s->model = owner->model; s->ctx = ctx; s->vocab = owner->vocab; s->ownsModel = false;
     s->nCtx = (int)llama_n_ctx(ctx);
+    s->threads = threads;
     return reinterpret_cast<jlong>(s);
 }
 
@@ -162,6 +304,7 @@ JNIEXPORT jdoubleArray JNICALL Java_com_everettpenne_unolab_Llm_nativePrefill(JN
     if (n < 0) { throwJava(env, "Tokenizing failed"); return nullptr; }
     tokens.resize(n);
     if (s->nPast + n >= s->nCtx) { throwJava(env, "The conversation is too long for the context; start a new chat"); return nullptr; }
+    applyTuning(s);
     double t0 = nowMs();
     for (int i = 0; i < n; i += s->nBatch) {
         int m = std::min(s->nBatch, n - i);
@@ -170,6 +313,7 @@ JNIEXPORT jdoubleArray JNICALL Java_com_everettpenne_unolab_Llm_nativePrefill(JN
         s->nPast += m;
     }
     double ms = nowMs() - t0;
+    LOGI("prefill: %d tok in %.0f ms, %.1f tok/s", n, ms, ms > 0 ? n * 1000.0 / ms : 0.0);
     jdoubleArray out = env->NewDoubleArray(2);
     double v[2] = {double(n), ms};
     env->SetDoubleArrayRegion(out, 0, 2, v);
@@ -182,6 +326,7 @@ JNIEXPORT jdoubleArray JNICALL Java_com_everettpenne_unolab_Llm_nativeGenerate(J
                                                                                 jint topK, jstring jgrammar, jobject sink) {
     auto* s = reinterpret_cast<Session*>(h);
     s->stop = false;
+    applyTuning(s);
     jclass sinkCls = env->GetObjectClass(sink);
     jmethodID onPiece = env->GetMethodID(sinkCls, "onPiece", "([B)V");
     llama_sampler* smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
@@ -224,6 +369,7 @@ JNIEXPORT jdoubleArray JNICALL Java_com_everettpenne_unolab_Llm_nativeGenerate(J
     }
     flush(true);
     double ms = nowMs() - t0;
+    LOGI("decode: %d tok in %.0f ms, %.1f tok/s", produced, ms, ms > 0 ? produced * 1000.0 / ms : 0.0);
     llama_sampler_free(smpl);
     jdoubleArray out = env->NewDoubleArray(3);
     double v[3] = {double(produced), ms, natural ? 1.0 : 0.0};

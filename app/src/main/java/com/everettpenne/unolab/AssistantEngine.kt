@@ -64,7 +64,8 @@ object AssistantEngine {
     private val _state = MutableStateFlow<State>(State.Missing)
     val state: StateFlow<State> = _state
 
-    /** Four was fastest on a Tensor G4 (more threads ran slower); never more than there are cores. */
+    /** The most threads the model is given; the native side uses one per fast core the process is allowed at that moment (three in
+     *  the background on a Tensor G4, four in front), in a pool it keeps. Never more than there are cores. */
     @Volatile var threads = minOf(4, Runtime.getRuntime().availableProcessors())
 
     /** The chat's context, which owns the weights; 0 when nothing is loaded. Read and used on [dispatcher] only. */
