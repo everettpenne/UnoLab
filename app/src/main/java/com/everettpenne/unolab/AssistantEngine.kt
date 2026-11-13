@@ -52,6 +52,7 @@ object AssistantEngine {
     /** A saved prefix state is the KV and recurrent state for a few hundred tokens: a few MB. Anything larger is not worth keeping. */
     private const val MAX_PREFIX_BYTES = 64L * 1024 * 1024
     private const val TAG = "UnoLabTiming"
+    private const val PLAN_TAG = "UnoLabPlan"
 
     val dispatcher = Executors.newSingleThreadExecutor { r -> Thread(r, "llm").apply { priority = Thread.MAX_PRIORITY } }.asCoroutineDispatcher()
     private val scope = CoroutineScope(SupervisorJob() + dispatcher)
@@ -218,7 +219,9 @@ object AssistantEngine {
             }
         }.onFailure { return@withContext Planner.error(it.message ?: "The planner failed.") }
         Log.i(TAG, "plan ${elapsed(t0)} ms (${prepared[0].toInt()} tok in, ${reply.length} chars out)")
-        Log.i(TAG, "plan reply: ${reply.toString().trim()}")
+        // The plan carries what was asked for (a note's words, a number), so it is logged only when a test asks:
+        // adb shell setprop log.tag.UnoLabPlan DEBUG
+        if (Log.isLoggable(PLAN_TAG, Log.DEBUG)) Log.d(PLAN_TAG, "plan reply: ${reply.toString().trim()}")
         reply.toString().trim()
     }
 
