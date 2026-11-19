@@ -243,6 +243,32 @@ JNIEXPORT void JNICALL Java_com_everettpenne_unolab_Llm_nativeFree(JNIEnv*, jobj
     delete s;
 }
 
+// A LoRA adapter for [h]'s model (the planner's), loaded once beside the weights; 0 if it does not fit them. Applied per context with
+// nativeUseAdapter, so the same weights answer plainly and plan with it. Freed with the model, or by nativeFreeAdapter.
+JNIEXPORT jlong JNICALL Java_com_everettpenne_unolab_Llm_nativeLoadAdapter(JNIEnv* env, jobject, jlong h, jstring jpath) {
+    auto* s = reinterpret_cast<Session*>(h);
+    if (!s) return 0;
+    const char* path = env->GetStringUTFChars(jpath, nullptr);
+    llama_adapter_lora* adapter = llama_adapter_lora_init(s->model, path);
+    env->ReleaseStringUTFChars(jpath, path);
+    LOGI("adapter %s", adapter ? "loaded" : "did not load");
+    return reinterpret_cast<jlong>(adapter);
+}
+
+// Puts [adapter] on context [h] at [scale], or takes every adapter off it when [adapter] is 0.
+JNIEXPORT jboolean JNICALL Java_com_everettpenne_unolab_Llm_nativeUseAdapter(JNIEnv*, jobject, jlong h, jlong adapter, jfloat scale) {
+    auto* s = reinterpret_cast<Session*>(h);
+    if (!s) return JNI_FALSE;
+    if (adapter == 0) return llama_set_adapters_lora(s->ctx, nullptr, 0, nullptr) == 0 ? JNI_TRUE : JNI_FALSE;
+    llama_adapter_lora* list[1] = { reinterpret_cast<llama_adapter_lora*>(adapter) };
+    float scales[1] = { scale };
+    return llama_set_adapters_lora(s->ctx, list, 1, scales) == 0 ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL Java_com_everettpenne_unolab_Llm_nativeFreeAdapter(JNIEnv*, jobject, jlong adapter) {
+    if (adapter != 0) llama_adapter_lora_free(reinterpret_cast<llama_adapter_lora*>(adapter));
+}
+
 // Another context on [h]'s model, for a second conversation that does not disturb the first (the assistant's one-shot questions beside the chat).
 JNIEXPORT jlong JNICALL Java_com_everettpenne_unolab_Llm_nativeNewContext(JNIEnv* env, jobject, jlong h, jint nCtx, jint threads) {
     auto* owner = reinterpret_cast<Session*>(h);

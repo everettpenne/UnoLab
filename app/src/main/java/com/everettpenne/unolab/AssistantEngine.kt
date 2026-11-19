@@ -78,6 +78,19 @@ object AssistantEngine {
     /** What the loaded weights are, so a prefix state saved from a different model is never restored into this one. */
     private var modelKey = ""
 
+    /**
+     * The planner's adapter (a LoRA trained on the plans the launcher asks for), on the weights only while a plan is written; 0 when there
+     * is none. Merged into the weights, it made every other answer worse: a model tuned on plans alone answered "where did he live?" after
+     * "who painted the Starry Night?" with "I don't have a person in mind" (2 of 24 follow-ups, against 24 of 24 for the same weights
+     * without it). Kept apart, plans are as good as the merged model's and answers and the chat are the model's own.
+     */
+    private var adapter = 0L
+    private var adapterKey = ""
+    /** Whether a planner adapter is loaded on the weights (read on [dispatcher], or after a blocking load in a test). */
+    val hasAdapter: Boolean get() = adapter != 0L
+    /** Whether [helper] has the adapter on now, so it is set only when a turn changes kind. */
+    private var helperAdapted = false
+
     private var holders = 0
     private var idleJob: Job? = null
     private var askJob: Job? = null
@@ -101,6 +114,7 @@ object AssistantEngine {
         (_state.value as? State.Ready)?.let { if (chat != 0L) return it }
         // A model pushed to the drop folder is moved in here too, so Uno's search can use it before Uno Lab has been opened.
         if (store.find() == null) store.waiting()?.let { runCatching { store.moveIn(it) { } } }
+        store.waitingAdapter()?.let { runCatching { store.moveInAdapter(it) } }
         val file = store.find() ?: return State.Missing.also { _state.value = it }
         _state.value = State.Loading(file.name)
         val t0 = System.nanoTime()
@@ -108,6 +122,7 @@ object AssistantEngine {
             unloadNow(keepState = true)
             chat = Llm.nativeLoad(file.absolutePath, CONTEXT, threads)
             modelKey = "${file.name}:${file.length()}:${file.lastModified()}"
+            loadAdapter()
             State.Ready(file.name, Llm.nativeCtx(chat))
         }.getOrElse { State.Failed(it.message ?: it.toString()) }
         _state.value = next
@@ -120,8 +135,30 @@ object AssistantEngine {
     /** [loadNow] from any thread, waiting for it (for tests). */
     fun loadNowBlocking(): State = java.util.concurrent.FutureTask { loadNow() }.also { dispatcher.executor.execute(it) }.get()
 
+    /** Loads the adapter moved in, if any, onto the loaded weights. One that does not fit them is dropped, and plans use the weights alone. */
+    private fun loadAdapter() {
+        if (adapter != 0L) { Llm.nativeFreeAdapter(adapter); adapter = 0L }
+        adapterKey = ""
+        helperAdapted = false
+        val file = store.findAdapter() ?: return
+        adapter = Llm.nativeLoadAdapter(chat, file.absolutePath)
+        if (adapter == 0L) { Log.i(TAG, "adapter ${file.name} does not fit ${modelKey.substringBefore(':')}"); return }
+        adapterKey = "${file.name}:${file.length()}:${file.lastModified()}"
+        Log.i(TAG, "adapter ${file.name} loaded")
+    }
+
+    /** Puts the planner's adapter on the helper for a plan, and takes it off for anything else. */
+    private fun adapt(forPlan: Boolean) {
+        val want = forPlan && adapter != 0L
+        if (want == helperAdapted) return
+        Llm.nativeUseAdapter(helper, if (want) adapter else 0L, 1f)
+        helperAdapted = want
+    }
+
     /** Frees the model (the helper first: it does not own the weights). Call on [dispatcher]. */
     fun unloadNow(keepState: Boolean = false) {
+        // An adapter is freed with the weights it was loaded for.
+        adapter = 0L; adapterKey = ""; helperAdapted = false
         if (helper != 0L) { Llm.nativeFree(helper); helper = 0L }
         if (chat != 0L) { Llm.nativeFree(chat); chat = 0L }
         prefixes.clear()
@@ -151,7 +188,8 @@ object AssistantEngine {
             val state = loadNow()
             if (state !is State.Ready) { listener.onError(if (state is State.Failed) state.why else "No model in Uno Lab"); return@launch }
             runCatching {
-                if (helper == 0L) helper = Llm.nativeNewContext(chat, HELPER_CONTEXT, threads)
+                if (helper == 0L) { helper = Llm.nativeNewContext(chat, HELPER_CONTEXT, threads); helperAdapted = false }
+                adapt(forPlan = false)
                 startFrom("m$mode", Assistant.prefix(mode))
                 val tPre = System.nanoTime()
                 val pre = Llm.nativePrefill(helper, Assistant.turn(query, context))
@@ -206,7 +244,8 @@ object AssistantEngine {
         if (state !is State.Ready) {
             return@withContext Planner.error(if (state is State.Failed) state.why else "No model in Uno Lab")
         }
-        if (helper == 0L) helper = Llm.nativeNewContext(chat, HELPER_CONTEXT, threads)
+        if (helper == 0L) { helper = Llm.nativeNewContext(chat, HELPER_CONTEXT, threads); helperAdapted = false }
+        adapt(forPlan = true)
         val t0 = System.nanoTime()
         val prepared = runCatching {
             startFrom("plan-${request.hash}", Planner.prefix(request))
@@ -233,6 +272,9 @@ object AssistantEngine {
     private fun fingerprint(key: String, prefixText: String): String {
         val digest = MessageDigest.getInstance("SHA-256")
         digest.update(modelKey.toByteArray())
+        digest.update(byteArrayOf(0))
+        // A plan's prefix is decoded with the adapter on, so it belongs to that adapter too; the answer prompts never have it.
+        if (key.startsWith("plan-")) digest.update(adapterKey.toByteArray())
         digest.update(byteArrayOf(0))
         digest.update(key.toByteArray())
         digest.update(byteArrayOf(0))

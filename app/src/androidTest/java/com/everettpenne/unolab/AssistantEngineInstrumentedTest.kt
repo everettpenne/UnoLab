@@ -48,6 +48,29 @@ class AssistantEngineInstrumentedTest {
         assertTrue("the second question reused the decoded system prompt: $firstMs vs $secondMs ms", secondMs < firstMs)
     }
 
+    /**
+     * The stock weights with the planner's adapter beside them (`*.lora.gguf`): an answer is the model's own, so a follow-up is read
+     * against what came before it, and a plan is written with the adapter on. Merged into the weights, the adapter answered this
+     * follow-up "I don't have a person in mind" nearly every time.
+     */
+    @Test fun answersComeFromTheWeightsAndPlansFromTheAdapter() {
+        AssistantEngine.init(context)
+        AssistantEngine.threads = minOf(4, Runtime.getRuntime().availableProcessors())
+        val state = AssistantEngine.loadNowBlocking()
+        assumeTrue("the model is in Uno Lab: $state", state is AssistantEngine.State.Ready)
+        assumeTrue("a planner adapter is beside it", AssistantEngine.hasAdapter)
+        val earlier = "Earlier in this conversation (oldest first):\n- They said: who painted the starry night\n  You answered: Vincent van Gogh painted the Starry Night."
+        val (answer, ms) = ask("where did he live", Assistant.ANSWER, earlier)
+        Log.i("AssistantTest", "follow-up ${ms} ms: $answer")
+        assertTrue(answer, Regex("Netherlands|France|Arles|Amsterdam|Paris|Auvers|Holland|Saint-R", RegexOption.IGNORE_CASE).containsMatchIn(answer))
+        val plan = kotlinx.coroutines.runBlocking { AssistantEngine.plan("""{"query":"set a timer for 5 minutes","hash":"adapter-test"}""") }
+        Log.i("AssistantTest", "plan: $plan")
+        assertTrue(plan, plan.contains("\"steps\"") && plan.contains("timer"))
+        // And back: the next answer is the weights' own again.
+        val (again, _) = ask("what is the capital of France", Assistant.ANSWER)
+        assertTrue(again, again.contains("Paris"))
+    }
+
     @Test fun anAnswerUsesThePhoneContext() {
         AssistantEngine.init(context)
         AssistantEngine.threads = minOf(4, Runtime.getRuntime().availableProcessors())

@@ -11,6 +11,12 @@ object Llm {
     external fun nativeReset(handle: Long)
     /** Another context on [handle]'s model; free it before [handle]. */
     external fun nativeNewContext(handle: Long, nCtx: Int, threads: Int): Long
+    /** The planner's LoRA for [handle]'s model; 0 when it does not load (trained on other weights). */
+    external fun nativeLoadAdapter(handle: Long, path: String): Long
+    /** Applies [adapter] to context [handle] at [scale], or no adapter at all when [adapter] is 0. */
+    external fun nativeUseAdapter(handle: Long, adapter: Long, scale: Float): Boolean
+    /** Frees an adapter before its model is freed (the model frees any left). */
+    external fun nativeFreeAdapter(adapter: Long)
     external fun nativeSaveState(handle: Long): ByteArray
     external fun nativeRestoreState(handle: Long, state: ByteArray, nPast: Int): Boolean
     external fun nativeUsed(handle: Long): Int

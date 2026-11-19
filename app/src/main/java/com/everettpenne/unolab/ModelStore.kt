@@ -16,7 +16,35 @@ class ModelStore(private val context: Context) {
     /** Where they are loaded from. */
     private val home: File get() = File(context.filesDir, "models").apply { mkdirs() }
 
-    private fun ggufs(d: File) = d.listFiles { f -> f.isFile && f.name.endsWith(".gguf") }?.toList().orEmpty()
+    /** Models: every .gguf that is not a planner adapter. */
+    private fun ggufs(d: File) = d.listFiles { f -> f.isFile && f.name.endsWith(".gguf") && !isAdapter(f.name) }?.toList().orEmpty()
+
+    /** Planner adapters (a LoRA on the model, `*.lora.gguf`): kept beside the model, one at a time, and never taken for a model. */
+    private fun adapters(d: File) = d.listFiles { f -> f.isFile && isAdapter(f.name) }?.toList().orEmpty()
+
+    /** An adapter dropped in [dir] and not yet moved in, if any. */
+    fun waitingAdapter(): File? = adapters(dir).maxByOrNull { it.lastModified() }
+
+    /** The adapter moved in, if any. */
+    fun findAdapter(): File? = adapters(home).maxByOrNull { it.lastModified() }
+
+    /** Moves a dropped adapter in, replacing the one there (they are tens of MB, copied in a moment). */
+    fun moveInAdapter(from: File): File {
+        val part = File(home, from.name + ".part")
+        from.inputStream().use { input -> part.outputStream().use { out -> input.copyTo(out, 1 shl 20) } }
+        val target = File(home, from.name)
+        adapters(home).forEach { it.delete() }
+        check(part.renameTo(target)) { "The adapter could not be moved in" }
+        from.delete()
+        return target
+    }
+
+    /** Drops the adapter: one trained on other weights must not stay beside a new model. */
+    fun forgetAdapter() { adapters(home).forEach { it.delete() } }
+
+    companion object {
+        fun isAdapter(name: String) = name.endsWith(".lora.gguf")
+    }
 
     /** A model dropped in [dir] and not yet moved in, if any. */
     fun waiting(): File? = ggufs(dir).maxByOrNull { it.lastModified() }
@@ -31,6 +59,7 @@ class ModelStore(private val context: Context) {
         from.inputStream().use { input -> part.outputStream().use { out -> copy(input, out, size, progress) } }
         val target = File(home, from.name)
         ggufs(home).forEach { it.delete() }   // one model at a time: they are over a gigabyte each
+        forgetAdapter()   // an adapter was trained on the weights it came with; a newer one dropped beside this model is moved in next
         check(part.renameTo(target)) { "The model could not be moved in" }
         from.delete()
         return target
@@ -59,6 +88,7 @@ class ModelStore(private val context: Context) {
         }
         val target = File(home, name)
         ggufs(home).forEach { it.delete() }
+        forgetAdapter()
         check(part.renameTo(target)) { "The copy could not be finished" }
         return target
     }
